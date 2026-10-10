@@ -1,0 +1,208 @@
+/* 当前文件 TODO 侧边栏样式，颜色全部使用 Obsidian 主题变量以适配深浅色主题 */
+
+.ctv-container {
+	padding: 8px 10px;
+	--ctv-max-lines: 2;
+}
+
+/* region 顶部摘要 */
+.ctv-header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 2px 4px 8px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	margin-bottom: 6px;
+}
+
+.ctv-file {
+	font-weight: var(--font-semibold);
+	color: var(--text-normal);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.ctv-count {
+	flex-shrink: 0;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.ctv-empty {
+	padding: 24px 8px;
+	text-align: center;
+	color: var(--text-faint);
+	font-size: var(--font-ui-small);
+}
+/* endregion */
+
+/* region 分组 */
+.ctv-group + .ctv-group {
+	margin-top: 4px;
+}
+
+.ctv-group-title {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	color: var(--text-normal);
+}
+
+.ctv-group-title:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.ctv-group-arrow {
+	display: flex;
+	color: var(--text-faint);
+	transition: transform 120ms ease;
+}
+
+.ctv-group-arrow svg {
+	width: 14px;
+	height: 14px;
+}
+
+.ctv-group.is-collapsed > .ctv-group-title > .ctv-group-arrow {
+	transform: rotate(-90deg);
+}
+
+.ctv-group-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.ctv-group-parent {
+	font-weight: normal;
+	color: var(--text-faint);
+}
+
+.ctv-group-count {
+	flex-shrink: 0;
+	font-size: var(--font-ui-smaller);
+	font-weight: normal;
+	color: var(--text-muted);
+	background-color: var(--background-modifier-hover);
+	border-radius: var(--radius-s);
+	padding: 0 6px;
+}
+
+.ctv-group-body {
+	margin-left: 10px;
+	padding-left: 6px;
+	border-left: 1px solid var(--background-modifier-border);
+}
+
+.ctv-group.is-collapsed > .ctv-group-body {
+	display: none;
+}
+/* endregion */
+
+/* region TODO 卡片 */
+.ctv-item {
+	padding: 6px;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+
+.ctv-item:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.ctv-item-main {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+}
+
+.ctv-item-icon {
+	display: flex;
+	flex-shrink: 0;
+	margin-top: 2px;
+	color: var(--text-accent);
+}
+
+.ctv-item-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.ctv-item-text {
+	flex: 1;
+	min-width: 0;
+	font-size: var(--font-ui-small);
+	line-height: 1.5;
+	color: var(--text-normal);
+	word-break: break-word;
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: var(--ctv-max-lines);
+	overflow: hidden;
+}
+
+.ctv-item-line {
+	flex-shrink: 0;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	font-family: var(--font-monospace);
+}
+
+.ctv-item-next {
+	margin: 2px 0 0 20px;
+	font-size: var(--font-ui-smaller);
+	line-height: 1.5;
+	color: var(--text-muted);
+	word-break: break-word;
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: var(--ctv-max-lines);
+	overflow: hidden;
+}
+
+.ctv-item-path {
+	margin: 2px 0 0 20px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* 展开后取消行数限制 */
+.ctv-item.is-expanded .ctv-item-text,
+.ctv-item.is-expanded .ctv-item-next {
+	-webkit-line-clamp: unset;
+	display: block;
+}
+
+/* 展开按钮默认隐藏，只有文本被截断时显示 */
+.ctv-item-toggle {
+	display: none;
+	margin: 2px 0 0 20px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-accent);
+}
+
+.ctv-item.has-overflow .ctv-item-toggle {
+	display: inline-block;
+}
+
+.ctv-item-toggle:hover {
+	text-decoration: underline;
+}
+
+.ctv-item.is-completed .ctv-item-text {
+	color: var(--text-faint);
+	text-decoration: line-through;
+}
+/* endregion */

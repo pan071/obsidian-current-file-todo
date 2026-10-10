@@ -1,0 +1,9 @@
+{
+  "id": "current-file-todo",
+  "name": "Current File TODO",
+  "version": "1.0.0",
+  "minAppVersion": "1.5.0",
+  "description": "在侧边栏展示当前文件的所有 TODO，支持 Markdown 任务、TODO 关键字、列表/分组切换与点击跳转。",
+  "author": "启年",
+  "isDesktopOnly": false
+}
