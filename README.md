@@ -74,14 +74,12 @@
     - `src/settings.ts`：设置页。
     - `src/types.ts`：公共类型、枚举与默认配置。
     - `test/parser.test.ts`：解析器测试用例。
-    - `scripts/install.mjs`：把构建产物复制到 Obsidian 仓库插件目录。
 - **常用命令：**
     - 安装依赖：`npm install`
     - 运行解析器测试：`npm test`
     - 开发模式（监听构建）：`npm run dev`
-    - 构建并安装到默认仓库（`/path/to/vault`）：`npm run deploy`
-    - 安装到其他仓库：`OBSIDIAN_VAULT="/仓库路径" node scripts/install.mjs`
+    - 构建：`npm run build`
 - **启用插件：**
-    - 构建产物 `main.js`、`manifest.json`、`styles.css` 会复制到 `<仓库>/.obsidian/plugins/current-file-todo/`。
+    - 将构建产物 `main.js`、`manifest.json`、`styles.css` 复制到 `<仓库>/.obsidian/plugins/current-file-todo/`。
     - 在「设置 → 第三方插件」中刷新已安装插件列表，启用「Current File TODO」。
     - 更新插件后，关闭再启用插件或重启 Obsidian 使改动生效。

@@ -7,8 +7,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "node scripts/test.mjs",
-    "deploy": "npm run build && node scripts/install.mjs"
+    "test": "node scripts/test.mjs"
   },
   "author": "启年",
   "license": "MIT",
