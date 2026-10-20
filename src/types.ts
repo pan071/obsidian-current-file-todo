@@ -4,6 +4,7 @@
  * @author 启年
  * @createTime 2026-10-10 09:23
  */
+import type { TFile } from "obsidian";
 
 /**
  * TODO 来源类型
@@ -38,6 +39,16 @@ export enum GroupStyle {
 }
 
 /**
+ * TODO 汇总范围
+ */
+export enum ScopeMode {
+	/** 当前文件 */
+	File = "file",
+	/** 当前文件所在目录（或已锁定的目录） */
+	Folder = "folder",
+}
+
+/**
  * 单条 TODO 解析结果
  */
 export interface TodoItem {
@@ -57,6 +68,28 @@ export interface TodoItem {
 	headingPath: string[];
 	/** 是否位于代码块内 */
 	inCodeBlock: boolean;
+}
+
+/**
+ * 单个文件的 TODO 解析结果（目录汇总时使用）
+ */
+export interface FileTodos {
+	/** 所属文件 */
+	file: TFile;
+	/** 文件内的 TODO，按行号排序 */
+	items: TodoItem[];
+}
+
+/**
+ * 目录 TODO 汇总结果
+ */
+export interface FolderTodos {
+	/** 含 TODO 的文件，按路径自然排序 */
+	files: FileTodos[];
+	/** 扫描范围内的 Markdown 文件数 */
+	fileCount: number;
+	/** 文件数是否超过扫描上限（超过时 files 为空，不做扫描） */
+	overLimit: boolean;
 }
 
 /**
@@ -87,6 +120,12 @@ export interface TodoSettings {
 	showHeadingPath: boolean;
 	/** 分组样式 */
 	groupStyle: GroupStyle;
+	/** 汇总范围 */
+	scopeMode: ScopeMode;
+	/** 目录范围下是否包含子目录 */
+	includeSubfolders: boolean;
+	/** 目录范围下最多扫描的 Markdown 文件数，超过时不扫描 */
+	maxFolderFiles: number;
 	/** 是否已在右侧边栏初始化过视图（仅首次安装自动添加） */
 	viewInitialized: boolean;
 }
@@ -105,6 +144,9 @@ export const DEFAULT_SETTINGS: TodoSettings = {
 	groupStyle: GroupStyle.Nested,
 	showLineNumber: true,
 	showHeadingPath: true,
+	scopeMode: ScopeMode.File,
+	includeSubfolders: false,
+	maxFolderFiles: 500,
 	viewInitialized: false,
 };
 

@@ -4,9 +4,9 @@
  * @author 启年
  * @createTime 2026-10-10 09:23
  */
-import { ItemView, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, SearchComponent, TAbstractFile, TFile, TFolder, ViewStateResult, WorkspaceLeaf, setIcon } from "obsidian";
 import type CurrentFileTodoPlugin from "./main";
-import { DisplayMode, GroupStyle, TodoItem, TodoKind, VIEW_TYPE_TODO } from "./types";
+import { DisplayMode, FileTodos, GroupStyle, ScopeMode, TodoItem, TodoKind, VIEW_TYPE_TODO } from "./types";
 
 /** 无标题分组的显示名称 */
 const NO_HEADING = "（文档开头）";
@@ -40,6 +40,36 @@ interface HeadingNode {
 }
 
 /**
+ * 视图当前的汇总范围
+ */
+interface ResolvedScope {
+	/** 范围类型 */
+	mode: ScopeMode;
+	/** 当前文件（仅文件范围） */
+	file: TFile | null;
+	/** 目标目录（仅目录范围）；锁定的目录已不存在或没有当前文件时为 null */
+	folder: TFolder | null;
+	/** 目录是否为锁定状态（仅目录范围） */
+	pinned: boolean;
+}
+
+/**
+ * 最近一次刷新得到的渲染数据，输入过滤词时直接复用，无需重新解析
+ */
+interface ScopeData {
+	/** 范围类型 */
+	mode: ScopeMode;
+	/** 顶部显示的名称：文件名或目录名 */
+	title: string;
+	/** 目录路径（仅目录范围），用于锁定与计算子目录相对路径 */
+	folderPath: string;
+	/** 目录是否已锁定（仅目录范围） */
+	pinned: boolean;
+	/** 文件及其 TODO；文件范围下只有当前文件一项，目录范围下只包含有 TODO 的文件 */
+	files: FileTodos[];
+}
+
+/**
  * 当前文件 TODO 侧边栏视图，图标显示在右侧边栏顶部标签栏中，与大纲、标签等视图并列
  *
  * @author 启年
@@ -50,14 +80,26 @@ export class TodoView extends ItemView {
 	private readonly plugin: CurrentFileTodoPlugin;
 	/** 已折叠的分组键 */
 	private readonly collapsedGroups = new Set<string>();
-	/** 已展开长文本的行号 */
-	private readonly expandedLines = new Set<number>();
-	/** 上次渲染的文件路径，切换文件时清空展开/折叠状态 */
-	private lastPath: string | null = null;
+	/** 已展开长文本的 TODO，键为「文件路径:行号」 */
+	private readonly expandedItems = new Set<string>();
+	/** 上次渲染的范围键，范围变化时清空展开/折叠状态 */
+	private lastScopeKey: string | null = null;
+	/** 锁定的目录路径；为 null 时目录范围跟随当前文件所在目录 */
+	private pinnedFolder: string | null = null;
+	/** 过滤词（小写），为空时不过滤 */
+	private filterQuery = "";
+	/** 刷新序号，异步解析期间又发起新刷新时丢弃旧结果 */
+	private refreshSeq = 0;
+	/** 最近一次刷新得到的渲染数据；展示空状态时为 null */
+	private data: ScopeData | null = null;
+	/** 列表内容区（过滤输入框之下），每次渲染时清空重建 */
+	private bodyEl: HTMLElement | null = null;
 	/** 展示模式切换按钮 */
 	private modeAction: HTMLElement | null = null;
 	/** 已完成任务显示切换按钮 */
 	private completedAction: HTMLElement | null = null;
+	/** 汇总范围切换按钮 */
+	private scopeAction: HTMLElement | null = null;
 
 	/**
 	 * 创建视图
@@ -85,7 +127,7 @@ export class TodoView extends ItemView {
 	 * @return 标题
 	 */
 	getDisplayText(): string {
-		return "当前文件 TODO";
+		return "TODO 汇总";
 	}
 
 	/**
@@ -98,24 +140,82 @@ export class TodoView extends ItemView {
 	}
 
 	/**
-	 * 视图打开时创建顶部操作按钮并首次渲染
+	 * 保存视图状态：锁定的目录随布局持久化，重启后仍然生效
+	 *
+	 * @return 视图状态
+	 */
+	getState(): Record<string, unknown> {
+		return { ...super.getState(), pinnedFolder: this.pinnedFolder };
+	}
+
+	/**
+	 * 恢复视图状态
+	 *
+	 * @param state 视图状态
+	 * @param result 状态变更结果
+	 */
+	async setState(state: unknown, result: ViewStateResult): Promise<void> {
+		// 只接受字符串形式的锁定目录
+		const pinned = (state as { pinnedFolder?: unknown } | null)?.pinnedFolder;
+		this.pinnedFolder = typeof pinned === "string" ? pinned : null;
+		await super.setState(state, result);
+		await this.refresh();
+	}
+
+	/**
+	 * 视图打开时创建过滤输入框与操作按钮并首次渲染
 	 */
 	async onOpen(): Promise<void> {
-		// 刷新按钮
-		this.addAction("refresh-cw", "刷新", () => this.plugin.refreshViews());
-		// 已完成任务显示开关
-		this.completedAction = this.addAction("check-square", "", async () => {
-			this.plugin.settings.showCompleted = !this.plugin.settings.showCompleted;
+		const el = this.contentEl;
+		el.empty();
+		el.addClass("ctv-container");
+		// 过滤输入框与操作按钮放在同一行并常驻顶部：列表重新渲染时不丢失输入焦点，侧边栏隐藏标题栏时按钮也可见
+		const toolbarEl = el.createDiv({ cls: "ctv-toolbar" });
+		new SearchComponent(toolbarEl)
+			.setPlaceholder("过滤 TODO，空格分隔多个词")
+			.setValue(this.filterQuery)
+			.onChange((value) => {
+				this.filterQuery = value.trim().toLowerCase();
+				this.renderData();
+			});
+		// 当前文件/当前目录切换
+		this.scopeAction = this.createToolbarButton(toolbarEl, async () => {
+			const settings = this.plugin.settings;
+			settings.scopeMode = settings.scopeMode === ScopeMode.File ? ScopeMode.Folder : ScopeMode.File;
 			await this.plugin.saveSettings();
 		});
 		// 列表/分组切换
-		this.modeAction = this.addAction("list", "", async () => {
+		this.modeAction = this.createToolbarButton(toolbarEl, async () => {
 			const settings = this.plugin.settings;
 			settings.displayMode = settings.displayMode === DisplayMode.List ? DisplayMode.Group : DisplayMode.List;
 			await this.plugin.saveSettings();
 		});
-		this.contentEl.addClass("ctv-container");
+		// 已完成任务显示开关
+		this.completedAction = this.createToolbarButton(toolbarEl, async () => {
+			this.plugin.settings.showCompleted = !this.plugin.settings.showCompleted;
+			await this.plugin.saveSettings();
+		});
+		// 刷新按钮，图标与提示固定不变
+		const refreshEl = this.createToolbarButton(toolbarEl, () => this.plugin.refreshViews());
+		setIcon(refreshEl, "refresh-cw");
+		refreshEl.setAttr("aria-label", "刷新");
+
+		this.bodyEl = el.createDiv({ cls: "ctv-body" });
 		await this.refresh();
+	}
+
+	/**
+	 * 在工具栏中创建图标按钮，图标与提示文字由 updateActions 统一设置
+	 *
+	 * @param parent 工具栏容器
+	 * @param onClick 点击回调
+	 * @return 按钮元素
+	 */
+	private createToolbarButton(parent: HTMLElement, onClick: () => unknown): HTMLElement {
+		const buttonEl = parent.createDiv({ cls: "ctv-toolbar-button clickable-icon" });
+		// 点击时执行回调，异步回调的结果无需等待
+		buttonEl.addEventListener("click", () => void onClick());
+		return buttonEl;
 	}
 
 	/**
@@ -123,35 +223,140 @@ export class TodoView extends ItemView {
 	 */
 	async onClose(): Promise<void> {
 		this.contentEl.empty();
+		this.bodyEl = null;
 	}
 
 	/**
-	 * 根据当前文件与配置重新渲染
+	 * 设置锁定的目录，并随布局保存
+	 *
+	 * @param path 目录路径；为 null 时解除锁定
+	 */
+	setPinnedFolder(path: string | null): void {
+		this.pinnedFolder = path;
+		// 视图状态变化后请求保存布局，使锁定目录在重启后仍然生效
+		this.app.workspace.requestSaveLayout();
+	}
+
+	/**
+	 * 目录被重命名或移动时同步锁定目录的路径
+	 *
+	 * @param file 被重命名的文件或目录
+	 * @param oldPath 旧路径
+	 */
+	handleRename(file: TAbstractFile, oldPath: string): void {
+		const pinned = this.pinnedFolder;
+		if (pinned === null || !(file instanceof TFolder)) {
+			return;
+		}
+		// 锁定目录自身或其上级目录被重命名时，替换路径前缀
+		if (pinned === oldPath) {
+			this.setPinnedFolder(file.path);
+		} else if (pinned.startsWith(`${oldPath}/`)) {
+			this.setPinnedFolder(file.path + pinned.slice(oldPath.length));
+		}
+	}
+
+	/**
+	 * 判断文件是否在本视图的展示范围内
+	 *
+	 * @param path 文件路径
+	 * @return 在范围内时为 true
+	 */
+	coversPath(path: string): boolean {
+		const scope = this.resolveScope();
+		// 文件范围：只看当前文件
+		if (scope.mode === ScopeMode.File) {
+			return scope.file !== null && scope.file.path === path;
+		}
+		// 目录范围：只关心 Markdown 文件
+		if (!scope.folder || !path.endsWith(".md")) {
+			return false;
+		}
+		return isPathInFolder(path, scope.folder.path, this.plugin.settings.includeSubfolders);
+	}
+
+	/**
+	 * 根据配置、锁定目录与当前文件计算展示范围
+	 *
+	 * @return 展示范围
+	 */
+	private resolveScope(): ResolvedScope {
+		const currentFile = this.plugin.currentFile;
+		// 文件范围
+		if (this.plugin.settings.scopeMode === ScopeMode.File) {
+			return { mode: ScopeMode.File, file: currentFile, folder: null, pinned: false };
+		}
+		// 目录范围：已锁定时使用锁定目录
+		if (this.pinnedFolder !== null) {
+			const folder = this.app.vault.getAbstractFileByPath(this.pinnedFolder);
+			return { mode: ScopeMode.Folder, file: null, folder: folder instanceof TFolder ? folder : null, pinned: true };
+		}
+		// 目录范围：未锁定时跟随当前文件所在目录
+		return { mode: ScopeMode.Folder, file: null, folder: currentFile ? currentFile.parent : null, pinned: false };
+	}
+
+	/**
+	 * 根据当前范围与配置重新解析并渲染
 	 */
 	async refresh(): Promise<void> {
+		// 视图尚未打开时不渲染
+		if (!this.bodyEl) {
+			return;
+		}
 		this.updateActions();
-		const file = this.plugin.currentFile;
-		// 切换文件时重置展开/折叠状态
-		const path = file ? file.path : null;
-		if (path !== this.lastPath) {
+		const seq = ++this.refreshSeq;
+		const scope = this.resolveScope();
+
+		// 范围变化时重置展开/折叠状态
+		const scopeKey = scope.mode === ScopeMode.File ? `file:${scope.file?.path ?? ""}` : `folder:${scope.folder?.path ?? ""}`;
+		if (scopeKey !== this.lastScopeKey) {
 			this.collapsedGroups.clear();
-			this.expandedLines.clear();
-			this.lastPath = path;
+			this.expandedItems.clear();
+			this.lastScopeKey = scopeKey;
 		}
-		if (!file) {
-			this.renderEmpty("当前没有打开的文件");
+
+		// region 文件范围
+		if (scope.mode === ScopeMode.File) {
+			const file = scope.file;
+			if (!file) {
+				this.renderEmpty("当前没有打开的文件");
+				return;
+			}
+			if (file.extension !== "md") {
+				this.renderEmpty("当前文件不是 Markdown");
+				return;
+			}
+			const items = await this.plugin.collectTodos(file);
+			// 异步读取期间又发起了新的刷新，以最新一次为准
+			if (seq !== this.refreshSeq) {
+				return;
+			}
+			this.data = { mode: ScopeMode.File, title: file.basename, folderPath: "", pinned: false, files: [{ file, items }] };
+			this.renderData();
 			return;
 		}
-		if (file.extension !== "md") {
-			this.renderEmpty("当前文件不是 Markdown");
+		// endregion
+
+		// region 目录范围
+		const folder = scope.folder;
+		if (!folder) {
+			this.renderEmpty(scope.pinned ? "锁定的目录已不存在" : "当前没有打开的文件", scope.pinned);
 			return;
 		}
-		const items = await this.plugin.collectTodos(file);
-		// 异步读取期间文件可能已切换，以最新文件为准
-		if (this.plugin.currentFile !== file) {
+		const result = await this.plugin.collectFolderTodos(folder);
+		// 异步读取期间又发起了新的刷新，以最新一次为准
+		if (seq !== this.refreshSeq) {
 			return;
 		}
-		this.render(file, items);
+		if (result.overLimit) {
+			const limit = this.plugin.settings.maxFolderFiles;
+			this.renderEmpty(`目录下有 ${result.fileCount} 个 Markdown 文件，超过扫描上限 ${limit}。请缩小范围、关闭「包含子目录」或在设置中调高上限。`, scope.pinned);
+			return;
+		}
+		const title = folder.isRoot() ? this.app.vault.getName() : folder.name;
+		this.data = { mode: ScopeMode.Folder, title, folderPath: folder.path, pinned: scope.pinned, files: result.files };
+		this.renderData();
+		// endregion
 	}
 
 	/**
@@ -170,49 +375,166 @@ export class TodoView extends ItemView {
 			this.completedAction.setAttr("aria-label", settings.showCompleted ? "隐藏已完成任务" : "显示已完成任务");
 			this.completedAction.toggleClass("is-active", settings.showCompleted);
 		}
+		if (this.scopeAction) {
+			// 图标表示点击后将切换到的范围
+			const toFolder = settings.scopeMode === ScopeMode.File;
+			setIcon(this.scopeAction, toFolder ? "folder" : "file-text");
+			this.scopeAction.setAttr("aria-label", toFolder ? "切换为当前目录 TODO" : "切换为当前文件 TODO");
+		}
 	}
 
 	/**
 	 * 渲染空状态
 	 *
 	 * @param message 提示文字
+	 * @param showUnpin 是否附带「解除锁定」入口（锁定目录不可用时）
 	 */
-	private renderEmpty(message: string): void {
-		this.contentEl.empty();
-		this.contentEl.createDiv({ cls: "ctv-empty", text: message });
+	private renderEmpty(message: string, showUnpin = false): void {
+		this.data = null;
+		if (!this.bodyEl) {
+			return;
+		}
+		this.bodyEl.empty();
+		const emptyEl = this.bodyEl.createDiv({ cls: "ctv-empty", text: message });
+		if (showUnpin) {
+			// 解除锁定后回到跟随当前文件所在目录
+			const unpinEl = emptyEl.createDiv({ cls: "ctv-empty-action", text: "解除锁定" });
+			unpinEl.addEventListener("click", () => {
+				this.setPinnedFolder(null);
+				void this.refresh();
+			});
+		}
 	}
 
 	/**
-	 * 渲染 TODO 列表
-	 *
-	 * @param file 当前文件
-	 * @param items TODO 列表
+	 * 按过滤词渲染最近一次刷新得到的数据
 	 */
-	private render(file: TFile, items: TodoItem[]): void {
+	private renderData(): void {
+		const data = this.data;
+		const el = this.bodyEl;
+		if (!data || !el) {
+			return;
+		}
 		const settings = this.plugin.settings;
-		const el = this.contentEl;
+		const isFolder = data.mode === ScopeMode.Folder;
 		el.empty();
 		// 通过 CSS 变量控制长文本折叠行数
 		el.style.setProperty("--ctv-max-lines", String(Math.max(1, settings.maxLines)));
 
-		// 顶部摘要：文件名与数量
-		const header = el.createDiv({ cls: "ctv-header" });
-		header.createSpan({ cls: "ctv-file", text: file.basename });
-		header.createSpan({ cls: "ctv-count", text: `共 ${items.length} 条` });
+		// region 过滤
+		const terms = this.filterQuery.split(/\s+/).filter((t) => t.length > 0);
+		const filtered: FileTodos[] = data.files
+			.map((ft) => ({ file: ft.file, items: terms.length > 0 ? ft.items.filter((item) => this.matches(item, ft.file, terms, isFolder)) : ft.items }))
+			// 目录范围下隐藏没有命中的文件
+			.filter((ft) => !isFolder || ft.items.length > 0);
+		const total = data.files.reduce((sum, ft) => sum + ft.items.length, 0);
+		const matched = filtered.reduce((sum, ft) => sum + ft.items.length, 0);
+		// endregion
 
-		if (items.length === 0) {
-			el.createDiv({ cls: "ctv-empty", text: "当前文件没有 TODO" });
+		this.renderHeader(el, data, terms.length > 0 ? `${matched} / ${total} 条` : `共 ${total} 条`, isFolder ? filtered.length : 0);
+
+		// region 空状态
+		if (total === 0) {
+			el.createDiv({ cls: "ctv-empty", text: isFolder ? "目录下没有 TODO" : "当前文件没有 TODO" });
 			return;
 		}
+		if (matched === 0) {
+			el.createDiv({ cls: "ctv-empty", text: "没有匹配的 TODO" });
+			return;
+		}
+		// endregion
 
 		const listEl = el.createDiv({ cls: "ctv-list" });
-		if (settings.displayMode === DisplayMode.Group) {
-			this.renderGroups(listEl, file, items);
+		if (!isFolder) {
+			// 文件范围：保持原有展示方式
+			const { file, items } = filtered[0];
+			if (settings.displayMode === DisplayMode.Group) {
+				this.renderGroups(listEl, file, items, "");
+			} else {
+				items.forEach((item) => this.renderItem(listEl, file, item, true, false));
+			}
+		} else if (settings.displayMode === DisplayMode.Group) {
+			// 目录范围 + 分组：先按文件分组，文件内再按标题分组
+			filtered.forEach((ft) => this.renderFileGroup(listEl, ft, data.folderPath));
 		} else {
-			items.forEach((item) => this.renderItem(listEl, file, item, true));
+			// 目录范围 + 平铺：按文件顺序、文件内按行号顺序平铺，每条附带文件名
+			filtered.forEach((ft) => ft.items.forEach((item) => this.renderItem(listEl, ft.file, item, true, true)));
 		}
 		// 布局完成后再判断哪些文本被截断，决定是否显示“展开”按钮
 		window.requestAnimationFrame(() => this.markOverflow(listEl));
+	}
+
+	/**
+	 * 渲染顶部摘要：范围名称、数量与目录锁定按钮
+	 *
+	 * @param parent 父容器
+	 * @param data 渲染数据
+	 * @param countText 数量文字
+	 * @param fileCount 有 TODO 的文件数（目录范围下展示）
+	 */
+	private renderHeader(parent: HTMLElement, data: ScopeData, countText: string, fileCount: number): void {
+		const isFolder = data.mode === ScopeMode.Folder;
+		const header = parent.createDiv({ cls: "ctv-header" });
+		// 范围图标 + 名称
+		const iconEl = header.createSpan({ cls: "ctv-header-icon" });
+		setIcon(iconEl, isFolder ? "folder" : "file-text");
+		const nameEl = header.createSpan({ cls: "ctv-file", text: data.title });
+		nameEl.setAttr("title", isFolder ? data.folderPath : data.files[0].file.path);
+		header.createSpan({ cls: "ctv-count", text: isFolder ? `${countText} · ${fileCount} 个文件` : countText });
+
+		if (!isFolder) {
+			return;
+		}
+		// 锁定按钮：锁定后不再跟随当前文件所在目录变化
+		const pinEl = header.createSpan({ cls: "ctv-header-pin clickable-icon" });
+		setIcon(pinEl, "pin");
+		pinEl.toggleClass("is-active", data.pinned);
+		pinEl.setAttr("aria-label", data.pinned ? "解除锁定，跟随当前文件所在目录" : "锁定此目录");
+		pinEl.addEventListener("click", () => {
+			this.setPinnedFolder(data.pinned ? null : data.folderPath);
+			void this.refresh();
+		});
+	}
+
+	/**
+	 * 判断 TODO 是否命中所有过滤词
+	 *
+	 * @param item TODO
+	 * @param file 所属文件
+	 * @param terms 小写过滤词
+	 * @param withFileName 是否把文件名纳入匹配（目录范围下）
+	 * @return 全部命中时为 true
+	 */
+	private matches(item: TodoItem, file: TFile, terms: string[], withFileName: boolean): boolean {
+		// 拼接关键字、正文、下一行、标题路径与文件名后统一匹配
+		const label = item.kind === TodoKind.Task ? "任务" : item.keyword;
+		const parts = [label, item.text, item.nextLine ?? "", item.headingPath.join(" ")];
+		if (withFileName) {
+			parts.push(file.basename);
+		}
+		const haystack = parts.join("\n").toLowerCase();
+		return terms.every((term) => haystack.includes(term));
+	}
+
+	/**
+	 * 渲染目录范围下的单个文件分组，文件内再按标题分组
+	 *
+	 * @param parent 父容器
+	 * @param fileTodos 文件及其 TODO
+	 * @param folderPath 范围目录路径，用于展示子目录相对路径
+	 */
+	private renderFileGroup(parent: HTMLElement, fileTodos: FileTodos, folderPath: string): void {
+		const { file, items } = fileTodos;
+		const bodyEl = this.renderGroupShell(parent, `file:${file.path}`, file.path, items.length, (nameEl) => {
+			nameEl.addClass("ctv-group-file");
+			// 包含子目录时，以浅色显示文件所在的子目录
+			const dir = relativeDir(file, folderPath);
+			if (dir.length > 0) {
+				nameEl.createSpan({ cls: "ctv-group-parent", text: `${dir}/` });
+			}
+			nameEl.createSpan({ text: file.basename });
+		});
+		this.renderGroups(bodyEl, file, items, `${file.path}|`);
 	}
 
 	/**
@@ -221,12 +543,13 @@ export class TodoView extends ItemView {
 	 * @param parent 父容器
 	 * @param file 当前文件
 	 * @param items TODO 列表
+	 * @param keyPrefix 分组键前缀，目录范围下用文件路径区分不同文件的同名标题
 	 */
-	private renderGroups(parent: HTMLElement, file: TFile, items: TodoItem[]): void {
+	private renderGroups(parent: HTMLElement, file: TFile, items: TodoItem[], keyPrefix: string): void {
 		if (this.plugin.settings.groupStyle === GroupStyle.Nested) {
-			this.renderNestedGroups(parent, file, items);
+			this.renderNestedGroups(parent, file, items, keyPrefix);
 		} else {
-			this.renderFlatGroups(parent, file, items);
+			this.renderFlatGroups(parent, file, items, keyPrefix);
 		}
 	}
 
@@ -236,8 +559,9 @@ export class TodoView extends ItemView {
 	 * @param parent 父容器
 	 * @param file 当前文件
 	 * @param items TODO 列表
+	 * @param keyPrefix 分组键前缀
 	 */
-	private renderFlatGroups(parent: HTMLElement, file: TFile, items: TodoItem[]): void {
+	private renderFlatGroups(parent: HTMLElement, file: TFile, items: TodoItem[], keyPrefix: string): void {
 		// 按标题路径聚合，保持首次出现顺序
 		const groups = new Map<string, TodoGroup>();
 		for (const item of items) {
@@ -251,7 +575,7 @@ export class TodoView extends ItemView {
 		}
 
 		for (const group of groups.values()) {
-			const bodyEl = this.renderGroupShell(parent, group.key, group.items.length, (nameEl) => {
+			const bodyEl = this.renderGroupShell(parent, keyPrefix + group.key, group.key || NO_HEADING, group.items.length, (nameEl) => {
 				if (group.path.length === 0) {
 					nameEl.setText(NO_HEADING);
 					return;
@@ -262,7 +586,7 @@ export class TodoView extends ItemView {
 				}
 				nameEl.createSpan({ text: group.path[group.path.length - 1] });
 			});
-			group.items.forEach((item) => this.renderItem(bodyEl, file, item, false));
+			group.items.forEach((item) => this.renderItem(bodyEl, file, item, false, false));
 		}
 	}
 
@@ -272,8 +596,9 @@ export class TodoView extends ItemView {
 	 * @param parent 父容器
 	 * @param file 当前文件
 	 * @param items TODO 列表
+	 * @param keyPrefix 分组键前缀
 	 */
-	private renderNestedGroups(parent: HTMLElement, file: TFile, items: TodoItem[]): void {
+	private renderNestedGroups(parent: HTMLElement, file: TFile, items: TodoItem[], keyPrefix: string): void {
 		const root: HeadingNode = { key: "", title: "", items: [], children: new Map(), total: 0 };
 		// 沿标题路径逐级挂载，同时累计每个节点下的 TODO 总数
 		for (const item of items) {
@@ -294,10 +619,10 @@ export class TodoView extends ItemView {
 
 		// 第一个标题之前的 TODO 单独成组
 		if (root.items.length > 0) {
-			const bodyEl = this.renderGroupShell(parent, "", root.items.length, (nameEl) => nameEl.setText(NO_HEADING));
-			root.items.forEach((item) => this.renderItem(bodyEl, file, item, false));
+			const bodyEl = this.renderGroupShell(parent, keyPrefix, NO_HEADING, root.items.length, (nameEl) => nameEl.setText(NO_HEADING));
+			root.items.forEach((item) => this.renderItem(bodyEl, file, item, false, false));
 		}
-		root.children.forEach((child) => this.renderHeadingNode(parent, file, child));
+		root.children.forEach((child) => this.renderHeadingNode(parent, file, child, keyPrefix));
 	}
 
 	/**
@@ -306,11 +631,12 @@ export class TodoView extends ItemView {
 	 * @param parent 父容器
 	 * @param file 当前文件
 	 * @param node 标题节点
+	 * @param keyPrefix 分组键前缀
 	 */
-	private renderHeadingNode(parent: HTMLElement, file: TFile, node: HeadingNode): void {
-		const bodyEl = this.renderGroupShell(parent, node.key, node.total, (nameEl) => nameEl.setText(node.title));
-		node.items.forEach((item) => this.renderItem(bodyEl, file, item, false));
-		node.children.forEach((child) => this.renderHeadingNode(bodyEl, file, child));
+	private renderHeadingNode(parent: HTMLElement, file: TFile, node: HeadingNode, keyPrefix: string): void {
+		const bodyEl = this.renderGroupShell(parent, keyPrefix + node.key, node.key, node.total, (nameEl) => nameEl.setText(node.title));
+		node.items.forEach((item) => this.renderItem(bodyEl, file, item, false, false));
+		node.children.forEach((child) => this.renderHeadingNode(bodyEl, file, child, keyPrefix));
 	}
 
 	/**
@@ -318,17 +644,18 @@ export class TodoView extends ItemView {
 	 *
 	 * @param parent 父容器
 	 * @param key 分组键，用于记录折叠状态
+	 * @param tooltip 标题行悬停提示
 	 * @param count 标题行显示的数量
 	 * @param renderName 渲染分组名称
 	 * @return 分组内容区容器
 	 */
-	private renderGroupShell(parent: HTMLElement, key: string, count: number, renderName: (nameEl: HTMLElement) => void): HTMLElement {
+	private renderGroupShell(parent: HTMLElement, key: string, tooltip: string, count: number, renderName: (nameEl: HTMLElement) => void): HTMLElement {
 		const groupEl = parent.createDiv({ cls: "ctv-group" });
 		groupEl.toggleClass("is-collapsed", this.collapsedGroups.has(key));
 
 		// 标题行：折叠箭头 + 名称 + 数量
 		const titleEl = groupEl.createDiv({ cls: "ctv-group-title" });
-		titleEl.setAttr("title", key || NO_HEADING);
+		titleEl.setAttr("title", tooltip);
 		const arrow = titleEl.createSpan({ cls: "ctv-group-arrow" });
 		setIcon(arrow, "chevron-down");
 		renderName(titleEl.createSpan({ cls: "ctv-group-name" }));
@@ -353,14 +680,16 @@ export class TodoView extends ItemView {
 	 * 渲染单条 TODO 卡片
 	 *
 	 * @param parent 父容器
-	 * @param file 当前文件
+	 * @param file 所属文件
 	 * @param item TODO
-	 * @param showPath 是否在卡片中展示所属标题（列表模式下展示）
+	 * @param showPath 是否在卡片中展示所属位置（平铺列表模式下展示）
+	 * @param showFile 所属位置中是否包含文件名（目录范围的平铺列表下展示）
 	 */
-	private renderItem(parent: HTMLElement, file: TFile, item: TodoItem, showPath: boolean): void {
+	private renderItem(parent: HTMLElement, file: TFile, item: TodoItem, showPath: boolean, showFile: boolean): void {
+		const itemKey = `${file.path}:${item.line}`;
 		const itemEl = parent.createDiv({ cls: "ctv-item" });
 		itemEl.toggleClass("is-completed", item.completed);
-		itemEl.toggleClass("is-expanded", this.expandedLines.has(item.line));
+		itemEl.toggleClass("is-expanded", this.expandedItems.has(itemKey));
 
 		// 主行：类型图标 + 关键字：正文 + 行号（可配置）
 		const mainEl = itemEl.createDiv({ cls: "ctv-item-main" });
@@ -382,28 +711,35 @@ export class TodoView extends ItemView {
 			nextEl.setAttr("title", item.nextLine);
 		}
 
-		// 列表模式下展示所属标题，便于定位
-		if (showPath && this.plugin.settings.showHeadingPath && item.headingPath.length > 0) {
-			itemEl.createDiv({ cls: "ctv-item-path", text: item.headingPath.join(" > ") });
+		// 平铺列表模式下展示所属位置（文件名 > 标题路径），便于定位
+		const headings = this.plugin.settings.showHeadingPath ? item.headingPath : [];
+		if (showPath && (showFile || headings.length > 0)) {
+			const pathEl = itemEl.createDiv({ cls: "ctv-item-path" });
+			if (showFile) {
+				pathEl.createSpan({ cls: "ctv-item-file", text: file.basename });
+			}
+			if (headings.length > 0) {
+				pathEl.appendText(`${showFile ? " > " : ""}${headings.join(" > ")}`);
+			}
 		}
 
 		// 展开/收起按钮，仅文本被截断时显示（见 markOverflow）
 		const toggleEl = itemEl.createDiv({ cls: "ctv-item-toggle" });
-		toggleEl.setText(this.expandedLines.has(item.line) ? "收起" : "展开");
+		toggleEl.setText(this.expandedItems.has(itemKey) ? "收起" : "展开");
 		toggleEl.addEventListener("click", (evt) => {
 			// 阻止冒泡，避免触发跳转
 			evt.stopPropagation();
-			const expanded = !this.expandedLines.has(item.line);
+			const expanded = !this.expandedItems.has(itemKey);
 			if (expanded) {
-				this.expandedLines.add(item.line);
+				this.expandedItems.add(itemKey);
 			} else {
-				this.expandedLines.delete(item.line);
+				this.expandedItems.delete(itemKey);
 			}
 			itemEl.toggleClass("is-expanded", expanded);
 			toggleEl.setText(expanded ? "收起" : "展开");
 		});
 
-		// 点击卡片跳转到对应行
+		// 点击卡片跳转到对应文件的对应行
 		itemEl.addEventListener("click", () => {
 			void this.plugin.jumpTo(file, item.line);
 		});
@@ -444,4 +780,64 @@ export class TodoView extends ItemView {
 		// 代码块内的 TODO 用代码图标区分
 		return item.inCodeBlock ? "code" : "circle-dot";
 	}
+}
+
+/**
+ * 统一目录路径：Obsidian 根目录的路径为 `/`，转换为空字符串便于拼接比较
+ *
+ * @param folderPath 目录路径
+ * @return 规范化后的目录路径
+ */
+function normalizeFolderPath(folderPath: string): string {
+	// 根目录统一为空字符串
+	return folderPath === "/" ? "" : folderPath;
+}
+
+/**
+ * 获取文件路径所在的目录路径
+ *
+ * @param path 文件路径
+ * @return 目录路径，位于根目录时为空字符串
+ */
+function parentPathOf(path: string): string {
+	// 取最后一个 `/` 之前的部分
+	const index = path.lastIndexOf("/");
+	return index < 0 ? "" : path.slice(0, index);
+}
+
+/**
+ * 判断文件路径是否位于目录下
+ *
+ * @param path 文件路径
+ * @param folderPath 目录路径
+ * @param recursive 是否包含子目录
+ * @return 位于目录下时为 true
+ */
+function isPathInFolder(path: string, folderPath: string, recursive: boolean): boolean {
+	const root = normalizeFolderPath(folderPath);
+	const parent = parentPathOf(path);
+	// 直接位于目录下
+	if (parent === root) {
+		return true;
+	}
+	// 包含子目录时，根目录覆盖全部文件，其他目录按路径前缀判断
+	return recursive && (root === "" || parent.startsWith(`${root}/`));
+}
+
+/**
+ * 计算文件所在目录相对范围目录的路径
+ *
+ * @param file 文件
+ * @param folderPath 范围目录路径
+ * @return 相对目录路径；文件直接位于范围目录下时为空字符串
+ */
+function relativeDir(file: TFile, folderPath: string): string {
+	const root = normalizeFolderPath(folderPath);
+	const parent = parentPathOf(file.path);
+	// 直接位于范围目录下
+	if (parent === root) {
+		return "";
+	}
+	// 根目录范围下直接返回完整目录路径，其他目录去掉范围目录前缀
+	return root === "" ? parent : parent.slice(root.length + 1);
 }

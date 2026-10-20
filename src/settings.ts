@@ -1,12 +1,12 @@
 /**
- * 插件设置页：关键字、大小写、识别范围、展示方式等配置
+ * 插件设置页：关键字、大小写、识别范围、汇总范围、展示方式等配置
  *
  * @author 启年
  * @createTime 2026-10-10 09:23
  */
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type CurrentFileTodoPlugin from "./main";
-import { DisplayMode, GroupStyle } from "./types";
+import { DisplayMode, GroupStyle, ScopeMode } from "./types";
 
 /**
  * 插件设置页，修改后立即保存并刷新侧边栏视图
@@ -103,6 +103,54 @@ export class TodoSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}),
 			);
+		// endregion
+
+		// region 汇总范围
+		new Setting(containerEl).setName("汇总范围").setHeading();
+
+		new Setting(containerEl)
+			.setName("默认范围")
+			.setDesc("当前文件只展示正在查看的笔记；当前目录汇总其所在目录下所有笔记的 TODO。也可以通过侧边栏顶部按钮切换，或在文件列表中右键目录选择「查看该目录 TODO」锁定目录。")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption(ScopeMode.File, "当前文件")
+					.addOption(ScopeMode.Folder, "当前目录")
+					.setValue(settings.scopeMode)
+					.onChange(async (value) => {
+						settings.scopeMode = value as ScopeMode;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("包含子目录")
+			.setDesc("目录范围下同时汇总所有子目录中的笔记。")
+			.addToggle((toggle) =>
+				toggle.setValue(settings.includeSubfolders).onChange(async (value) => {
+					settings.includeSubfolders = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("目录扫描文件上限")
+			.setDesc("目录范围下 Markdown 文件数超过该值时不扫描，避免误选整个库导致卡顿。")
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text.inputEl.min = "1";
+				text
+					.setPlaceholder("500")
+					.setValue(String(settings.maxFolderFiles))
+					.onChange(async (value) => {
+						// 只接受正整数，非法输入时保留原值
+						const limit = Number.parseInt(value, 10);
+						if (!Number.isFinite(limit) || limit < 1) {
+							return;
+						}
+						settings.maxFolderFiles = limit;
+						await this.plugin.saveSettings();
+					});
+			});
 		// endregion
 
 		// region 展示方式

@@ -1,22 +1,65 @@
-/* 当前文件 TODO 侧边栏样式，颜色全部使用 Obsidian 主题变量以适配深浅色主题 */
+/* TODO 侧边栏样式，颜色全部使用 Obsidian 主题变量以适配深浅色主题 */
 
 .ctv-container {
 	padding: 8px 10px;
 	--ctv-max-lines: 2;
 }
 
+/* region 过滤输入框与操作按钮 */
+.ctv-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 0 0 8px;
+}
+
+/* 输入框占满剩余宽度，按钮靠右 */
+.ctv-toolbar .search-input-container {
+	flex: 1;
+	min-width: 0;
+	margin: 0 4px 0 0;
+}
+
+.ctv-toolbar-button {
+	flex-shrink: 0;
+	padding: 4px;
+}
+
+.ctv-toolbar-button svg {
+	width: 16px;
+	height: 16px;
+}
+
+/* 已开启「显示已完成任务」时高亮按钮 */
+.ctv-toolbar-button.is-active {
+	color: var(--text-accent);
+}
+/* endregion */
+
 /* region 顶部摘要 */
 .ctv-header {
 	display: flex;
-	align-items: baseline;
-	justify-content: space-between;
-	gap: 8px;
+	align-items: center;
+	gap: 6px;
 	padding: 2px 4px 8px;
 	border-bottom: 1px solid var(--background-modifier-border);
 	margin-bottom: 6px;
 }
 
+.ctv-header-icon {
+	display: flex;
+	flex-shrink: 0;
+	color: var(--text-muted);
+}
+
+.ctv-header-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
 .ctv-file {
+	flex: 1;
+	min-width: 0;
 	font-weight: var(--font-semibold);
 	color: var(--text-normal);
 	overflow: hidden;
@@ -30,11 +73,36 @@
 	color: var(--text-muted);
 }
 
+.ctv-header-pin {
+	flex-shrink: 0;
+	padding: 2px;
+}
+
+.ctv-header-pin svg {
+	width: 14px;
+	height: 14px;
+}
+
+/* 锁定状态下高亮图标 */
+.ctv-header-pin.is-active {
+	color: var(--text-accent);
+}
+
 .ctv-empty {
 	padding: 24px 8px;
 	text-align: center;
 	color: var(--text-faint);
 	font-size: var(--font-ui-small);
+}
+
+.ctv-empty-action {
+	margin-top: 8px;
+	color: var(--text-accent);
+	cursor: pointer;
+}
+
+.ctv-empty-action:hover {
+	text-decoration: underline;
 }
 /* endregion */
 
@@ -80,6 +148,11 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+/* 目录范围下的文件分组名称 */
+.ctv-group-file {
+	color: var(--text-accent);
 }
 
 .ctv-group-parent {
@@ -176,6 +249,11 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+/* 目录范围平铺列表中的文件名 */
+.ctv-item-file {
+	color: var(--text-muted);
 }
 
 /* 展开后取消行数限制 */
