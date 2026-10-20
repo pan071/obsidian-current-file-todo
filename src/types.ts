@@ -110,6 +110,8 @@ export interface TodoSettings {
 	scanCodeBlocks: boolean;
 	/** 是否附带展示下一行文本 */
 	showNextLine: boolean;
+	/** TODO 文本是否自动换行；关闭时单行展示，整个列表横向滚动 */
+	wrapText: boolean;
 	/** 正文折叠前最多展示的行数 */
 	maxLines: number;
 	/** 展示模式 */
@@ -139,6 +141,7 @@ export const DEFAULT_SETTINGS: TodoSettings = {
 	showCompleted: false,
 	scanCodeBlocks: true,
 	showNextLine: true,
+	wrapText: false,
 	maxLines: 2,
 	displayMode: DisplayMode.List,
 	groupStyle: GroupStyle.Nested,

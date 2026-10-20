@@ -1,8 +1,22 @@
 /* TODO 侧边栏样式，颜色全部使用 Obsidian 主题变量以适配深浅色主题 */
 
+/* 工具栏与摘要固定在顶部，列表区域独立滚动，横向滚动条贴在面板底部 */
 .ctv-container {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
 	padding: 8px 10px;
 	--ctv-max-lines: 2;
+}
+
+.ctv-header-slot {
+	flex-shrink: 0;
+}
+
+.ctv-body {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
 }
 
 /* region 过滤输入框与操作按钮 */
@@ -33,6 +47,12 @@
 /* 已开启「显示已完成任务」时高亮按钮 */
 .ctv-toolbar-button.is-active {
 	color: var(--text-accent);
+}
+
+/* 平铺列表下全部展开/折叠按钮不可用 */
+.ctv-toolbar-button.is-disabled {
+	opacity: 0.4;
+	pointer-events: none;
 }
 /* endregion */
 
@@ -73,12 +93,21 @@
 	color: var(--text-muted);
 }
 
-.ctv-header-pin {
+/* 点击名称弹出目录选择框 */
+.ctv-file.is-clickable {
+	cursor: pointer;
+}
+
+.ctv-file.is-clickable:hover {
+	color: var(--text-accent);
+}
+
+.ctv-header-button {
 	flex-shrink: 0;
 	padding: 2px;
 }
 
-.ctv-header-pin svg {
+.ctv-header-button svg {
 	width: 14px;
 	height: 14px;
 }
@@ -150,9 +179,36 @@
 	white-space: nowrap;
 }
 
+/* 分组类型图标：标题分组为浅色 #，文件分组为强调色文件图标 */
+.ctv-group-icon {
+	display: flex;
+	flex-shrink: 0;
+	color: var(--text-faint);
+}
+
+.ctv-group-icon svg {
+	width: 13px;
+	height: 13px;
+}
+
+.ctv-group.is-file-group > .ctv-group-title > .ctv-group-icon {
+	color: var(--text-accent);
+}
+
+/* 标题分组使用常规字重，与加粗的文件分组区分 */
+.ctv-group:not(.is-file-group) > .ctv-group-title {
+	font-weight: var(--font-normal);
+}
+
 /* 目录范围下的文件分组名称 */
 .ctv-group-file {
 	color: var(--text-accent);
+}
+
+/* 文件后缀以浅色显示 */
+.ctv-group-ext {
+	font-weight: normal;
+	color: var(--text-faint);
 }
 
 .ctv-group-parent {
@@ -282,5 +338,103 @@
 .ctv-item.is-completed .ctv-item-text {
 	color: var(--text-faint);
 	text-decoration: line-through;
+}
+/* endregion */
+
+/* region 不自动换行：单行展示，整个列表横向滚动 */
+/* 列表宽度取最长一行，不足面板宽度时撑满 */
+.ctv-nowrap .ctv-list {
+	width: max-content;
+	min-width: 100%;
+}
+
+.ctv-nowrap .ctv-item-text,
+.ctv-nowrap .ctv-item-next {
+	flex: none;
+	display: block;
+	white-space: nowrap;
+	overflow: visible;
+	-webkit-line-clamp: unset;
+}
+
+.ctv-nowrap .ctv-group-name,
+.ctv-nowrap .ctv-item-path {
+	overflow: visible;
+	text-overflow: clip;
+}
+
+/* 单行展示时不需要展开/收起 */
+.ctv-nowrap .ctv-item-toggle {
+	display: none !important;
+}
+/* endregion */
+
+/* region 目录选择弹窗 */
+.ctv-folder-modal .search-input-container {
+	margin-bottom: 8px;
+}
+
+.ctv-folder-tree {
+	max-height: 60vh;
+	overflow: auto;
+}
+
+.ctv-folder-row {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 8px 3px 4px;
+	border-radius: var(--radius-s);
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
+	white-space: nowrap;
+}
+
+.ctv-folder-row:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+/* 选中的目录高亮 */
+.ctv-folder-row.is-selected {
+	background-color: var(--background-modifier-active-hover);
+	color: var(--text-accent);
+}
+
+/* 箭头占固定宽度，没有子目录时留空以保持对齐 */
+.ctv-folder-arrow {
+	display: flex;
+	flex-shrink: 0;
+	width: 16px;
+	color: var(--text-faint);
+	transition: transform 120ms ease;
+}
+
+.ctv-folder-arrow.is-expanded {
+	transform: rotate(90deg);
+}
+
+.ctv-folder-arrow svg,
+.ctv-folder-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.ctv-folder-icon {
+	display: flex;
+	flex-shrink: 0;
+	color: var(--text-muted);
+}
+
+.ctv-folder-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.ctv-folder-empty {
+	padding: 16px 8px;
+	text-align: center;
+	color: var(--text-faint);
+	font-size: var(--font-ui-small);
 }
 /* endregion */

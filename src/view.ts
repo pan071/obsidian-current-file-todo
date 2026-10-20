@@ -5,6 +5,7 @@
  * @createTime 2026-10-10 09:23
  */
 import { ItemView, SearchComponent, TAbstractFile, TFile, TFolder, ViewStateResult, WorkspaceLeaf, setIcon } from "obsidian";
+import { FolderTreeModal } from "./folder-modal";
 import type CurrentFileTodoPlugin from "./main";
 import { DisplayMode, FileTodos, GroupStyle, ScopeMode, TodoItem, TodoKind, VIEW_TYPE_TODO } from "./types";
 
@@ -21,6 +22,18 @@ interface TodoGroup {
 	path: string[];
 	/** 分组内 TODO */
 	items: TodoItem[];
+}
+
+/**
+ * 分组类型图标（Lucide 图标名），用于区分文件分组与标题分组
+ */
+enum GroupIcon {
+	/** 文件分组（目录范围下） */
+	File = "file-text",
+	/** 标题分组 */
+	Heading = "hash",
+	/** 第一个标题之前的内容 */
+	DocumentStart = "align-left",
 }
 
 /**
@@ -92,14 +105,20 @@ export class TodoView extends ItemView {
 	private refreshSeq = 0;
 	/** 最近一次刷新得到的渲染数据；展示空状态时为 null */
 	private data: ScopeData | null = null;
-	/** 列表内容区（过滤输入框之下），每次渲染时清空重建 */
+	/** 顶部摘要区（固定在列表上方，不随列表滚动），每次渲染时清空重建 */
+	private headerEl: HTMLElement | null = null;
+	/** 列表内容区（独立滚动），每次渲染时清空重建 */
 	private bodyEl: HTMLElement | null = null;
+	/** 本次渲染出的全部分组键，用于全部展开/折叠 */
+	private renderedGroupKeys: string[] = [];
 	/** 展示模式切换按钮 */
 	private modeAction: HTMLElement | null = null;
 	/** 已完成任务显示切换按钮 */
 	private completedAction: HTMLElement | null = null;
 	/** 汇总范围切换按钮 */
 	private scopeAction: HTMLElement | null = null;
+	/** 全部展开/折叠按钮 */
+	private foldAction: HTMLElement | null = null;
 
 	/**
 	 * 创建视图
@@ -190,6 +209,8 @@ export class TodoView extends ItemView {
 			settings.displayMode = settings.displayMode === DisplayMode.List ? DisplayMode.Group : DisplayMode.List;
 			await this.plugin.saveSettings();
 		});
+		// 全部展开/折叠，仅分组模式下可用
+		this.foldAction = this.createToolbarButton(toolbarEl, () => this.toggleFoldAll());
 		// 已完成任务显示开关
 		this.completedAction = this.createToolbarButton(toolbarEl, async () => {
 			this.plugin.settings.showCompleted = !this.plugin.settings.showCompleted;
@@ -200,6 +221,7 @@ export class TodoView extends ItemView {
 		setIcon(refreshEl, "refresh-cw");
 		refreshEl.setAttr("aria-label", "刷新");
 
+		this.headerEl = el.createDiv({ cls: "ctv-header-slot" });
 		this.bodyEl = el.createDiv({ cls: "ctv-body" });
 		await this.refresh();
 	}
@@ -223,6 +245,7 @@ export class TodoView extends ItemView {
 	 */
 	async onClose(): Promise<void> {
 		this.contentEl.empty();
+		this.headerEl = null;
 		this.bodyEl = null;
 	}
 
@@ -391,9 +414,12 @@ export class TodoView extends ItemView {
 	 */
 	private renderEmpty(message: string, showUnpin = false): void {
 		this.data = null;
+		this.renderedGroupKeys = [];
+		this.updateFoldAction();
 		if (!this.bodyEl) {
 			return;
 		}
+		this.headerEl?.empty();
 		this.bodyEl.empty();
 		const emptyEl = this.bodyEl.createDiv({ cls: "ctv-empty", text: message });
 		if (showUnpin) {
@@ -418,8 +444,11 @@ export class TodoView extends ItemView {
 		const settings = this.plugin.settings;
 		const isFolder = data.mode === ScopeMode.Folder;
 		el.empty();
+		this.renderedGroupKeys = [];
 		// 通过 CSS 变量控制长文本折叠行数
 		el.style.setProperty("--ctv-max-lines", String(Math.max(1, settings.maxLines)));
+		// 不自动换行时单行展示，整个列表横向滚动
+		el.toggleClass("ctv-nowrap", !settings.wrapText);
 
 		// region 过滤
 		const terms = this.filterQuery.split(/\s+/).filter((t) => t.length > 0);
@@ -431,15 +460,12 @@ export class TodoView extends ItemView {
 		const matched = filtered.reduce((sum, ft) => sum + ft.items.length, 0);
 		// endregion
 
-		this.renderHeader(el, data, terms.length > 0 ? `${matched} / ${total} 条` : `共 ${total} 条`, isFolder ? filtered.length : 0);
+		this.renderHeader(data, terms.length > 0 ? `${matched} / ${total} 条` : `共 ${total} 条`, isFolder ? filtered.length : 0);
 
 		// region 空状态
-		if (total === 0) {
-			el.createDiv({ cls: "ctv-empty", text: isFolder ? "目录下没有 TODO" : "当前文件没有 TODO" });
-			return;
-		}
-		if (matched === 0) {
-			el.createDiv({ cls: "ctv-empty", text: "没有匹配的 TODO" });
+		if (total === 0 || matched === 0) {
+			el.createDiv({ cls: "ctv-empty", text: total === 0 ? (isFolder ? "目录下没有 TODO" : "当前文件没有 TODO") : "没有匹配的 TODO" });
+			this.updateFoldAction();
 			return;
 		}
 		// endregion
@@ -460,33 +486,48 @@ export class TodoView extends ItemView {
 			// 目录范围 + 平铺：按文件顺序、文件内按行号顺序平铺，每条附带文件名
 			filtered.forEach((ft) => ft.items.forEach((item) => this.renderItem(listEl, ft.file, item, true, true)));
 		}
-		// 布局完成后再判断哪些文本被截断，决定是否显示“展开”按钮
-		window.requestAnimationFrame(() => this.markOverflow(listEl));
+		this.updateFoldAction();
+		// 自动换行时，布局完成后再判断哪些文本被截断，决定是否显示“展开”按钮
+		if (settings.wrapText) {
+			window.requestAnimationFrame(() => this.markOverflow(listEl));
+		}
 	}
 
 	/**
-	 * 渲染顶部摘要：范围名称、数量与目录锁定按钮
+	 * 渲染顶部摘要：范围名称（点击选择目录）、数量、上一级与目录锁定按钮
 	 *
-	 * @param parent 父容器
 	 * @param data 渲染数据
 	 * @param countText 数量文字
 	 * @param fileCount 有 TODO 的文件数（目录范围下展示）
 	 */
-	private renderHeader(parent: HTMLElement, data: ScopeData, countText: string, fileCount: number): void {
+	private renderHeader(data: ScopeData, countText: string, fileCount: number): void {
+		if (!this.headerEl) {
+			return;
+		}
 		const isFolder = data.mode === ScopeMode.Folder;
-		const header = parent.createDiv({ cls: "ctv-header" });
-		// 范围图标 + 名称
+		this.headerEl.empty();
+		const header = this.headerEl.createDiv({ cls: "ctv-header" });
+		// 范围图标 + 名称，点击弹出目录选择框
 		const iconEl = header.createSpan({ cls: "ctv-header-icon" });
 		setIcon(iconEl, isFolder ? "folder" : "file-text");
-		const nameEl = header.createSpan({ cls: "ctv-file", text: data.title });
-		nameEl.setAttr("title", isFolder ? data.folderPath : data.files[0].file.path);
+		const nameEl = header.createSpan({ cls: "ctv-file is-clickable", text: data.title });
+		nameEl.setAttr("title", `${isFolder ? data.folderPath : data.files[0].file.path}\n点击选择其他目录`);
+		nameEl.addEventListener("click", () => this.chooseFolder());
 		header.createSpan({ cls: "ctv-count", text: isFolder ? `${countText} · ${fileCount} 个文件` : countText });
 
 		if (!isFolder) {
 			return;
 		}
+		// 上一级按钮：根目录没有上一级时不展示
+		const parentFolder = this.app.vault.getAbstractFileByPath(data.folderPath)?.parent ?? null;
+		if (parentFolder) {
+			const upEl = header.createSpan({ cls: "ctv-header-button clickable-icon" });
+			setIcon(upEl, "arrow-up");
+			upEl.setAttr("aria-label", `切换到上一级目录：${parentFolder.isRoot() ? this.app.vault.getName() : parentFolder.name}`);
+			upEl.addEventListener("click", () => void this.showFolder(parentFolder));
+		}
 		// 锁定按钮：锁定后不再跟随当前文件所在目录变化
-		const pinEl = header.createSpan({ cls: "ctv-header-pin clickable-icon" });
+		const pinEl = header.createSpan({ cls: "ctv-header-button ctv-header-pin clickable-icon" });
 		setIcon(pinEl, "pin");
 		pinEl.toggleClass("is-active", data.pinned);
 		pinEl.setAttr("aria-label", data.pinned ? "解除锁定，跟随当前文件所在目录" : "锁定此目录");
@@ -494,6 +535,68 @@ export class TodoView extends ItemView {
 			this.setPinnedFolder(data.pinned ? null : data.folderPath);
 			void this.refresh();
 		});
+	}
+
+	/**
+	 * 弹出树形目录选择框，默认选中当前展示的目录（文件范围下为当前文件所在目录），选中后切换为目录范围并锁定该目录
+	 */
+	private chooseFolder(): void {
+		const scope = this.resolveScope();
+		// 目录范围取当前展示的目录，文件范围取当前文件所在目录
+		const initial = scope.mode === ScopeMode.Folder ? scope.folder : scope.file?.parent ?? null;
+		new FolderTreeModal(this.app, initial, (folder) => void this.showFolder(folder)).open();
+	}
+
+	/**
+	 * 切换为目录范围并锁定指定目录
+	 *
+	 * @param folder 目标目录
+	 */
+	private async showFolder(folder: TFolder): Promise<void> {
+		this.setPinnedFolder(folder.path);
+		const settings = this.plugin.settings;
+		// 当前为文件范围时先切换为目录范围，保存配置时会刷新所有视图
+		if (settings.scopeMode !== ScopeMode.Folder) {
+			settings.scopeMode = ScopeMode.Folder;
+			await this.plugin.saveSettings();
+			return;
+		}
+		await this.refresh();
+	}
+
+	/**
+	 * 全部展开或全部折叠：有任一分组展开时全部折叠，否则全部展开
+	 */
+	private toggleFoldAll(): void {
+		const keys = this.renderedGroupKeys;
+		if (keys.length === 0) {
+			return;
+		}
+		// 判断当前是否已全部折叠
+		const allCollapsed = keys.every((key) => this.collapsedGroups.has(key));
+		if (allCollapsed) {
+			this.collapsedGroups.clear();
+		} else {
+			keys.forEach((key) => this.collapsedGroups.add(key));
+		}
+		this.renderData();
+	}
+
+	/**
+	 * 同步全部展开/折叠按钮的图标、提示与可用状态
+	 */
+	private updateFoldAction(): void {
+		const action = this.foldAction;
+		if (!action) {
+			return;
+		}
+		const keys = this.renderedGroupKeys;
+		// 平铺列表或没有分组时按钮不可用
+		const disabled = keys.length === 0;
+		const allCollapsed = !disabled && keys.every((key) => this.collapsedGroups.has(key));
+		setIcon(action, allCollapsed ? "chevrons-up-down" : "chevrons-down-up");
+		action.toggleClass("is-disabled", disabled);
+		action.setAttr("aria-label", disabled ? "按标题分组时可全部展开/折叠" : allCollapsed ? "全部展开" : "全部折叠");
 	}
 
 	/**
@@ -525,7 +628,7 @@ export class TodoView extends ItemView {
 	 */
 	private renderFileGroup(parent: HTMLElement, fileTodos: FileTodos, folderPath: string): void {
 		const { file, items } = fileTodos;
-		const bodyEl = this.renderGroupShell(parent, `file:${file.path}`, file.path, items.length, (nameEl) => {
+		const bodyEl = this.renderGroupShell(parent, `file:${file.path}`, file.path, items.length, GroupIcon.File, (nameEl) => {
 			nameEl.addClass("ctv-group-file");
 			// 包含子目录时，以浅色显示文件所在的子目录
 			const dir = relativeDir(file, folderPath);
@@ -533,6 +636,8 @@ export class TodoView extends ItemView {
 				nameEl.createSpan({ cls: "ctv-group-parent", text: `${dir}/` });
 			}
 			nameEl.createSpan({ text: file.basename });
+			// 附带文件后缀，与标题分组明显区分
+			nameEl.createSpan({ cls: "ctv-group-ext", text: `.${file.extension}` });
 		});
 		this.renderGroups(bodyEl, file, items, `${file.path}|`);
 	}
@@ -575,7 +680,8 @@ export class TodoView extends ItemView {
 		}
 
 		for (const group of groups.values()) {
-			const bodyEl = this.renderGroupShell(parent, keyPrefix + group.key, group.key || NO_HEADING, group.items.length, (nameEl) => {
+			const icon = group.path.length === 0 ? GroupIcon.DocumentStart : GroupIcon.Heading;
+			const bodyEl = this.renderGroupShell(parent, keyPrefix + group.key, group.key || NO_HEADING, group.items.length, icon, (nameEl) => {
 				if (group.path.length === 0) {
 					nameEl.setText(NO_HEADING);
 					return;
@@ -619,7 +725,7 @@ export class TodoView extends ItemView {
 
 		// 第一个标题之前的 TODO 单独成组
 		if (root.items.length > 0) {
-			const bodyEl = this.renderGroupShell(parent, keyPrefix, NO_HEADING, root.items.length, (nameEl) => nameEl.setText(NO_HEADING));
+			const bodyEl = this.renderGroupShell(parent, keyPrefix, NO_HEADING, root.items.length, GroupIcon.DocumentStart, (nameEl) => nameEl.setText(NO_HEADING));
 			root.items.forEach((item) => this.renderItem(bodyEl, file, item, false, false));
 		}
 		root.children.forEach((child) => this.renderHeadingNode(parent, file, child, keyPrefix));
@@ -634,7 +740,7 @@ export class TodoView extends ItemView {
 	 * @param keyPrefix 分组键前缀
 	 */
 	private renderHeadingNode(parent: HTMLElement, file: TFile, node: HeadingNode, keyPrefix: string): void {
-		const bodyEl = this.renderGroupShell(parent, keyPrefix + node.key, node.key, node.total, (nameEl) => nameEl.setText(node.title));
+		const bodyEl = this.renderGroupShell(parent, keyPrefix + node.key, node.key, node.total, GroupIcon.Heading, (nameEl) => nameEl.setText(node.title));
 		node.items.forEach((item) => this.renderItem(bodyEl, file, item, false, false));
 		node.children.forEach((child) => this.renderHeadingNode(bodyEl, file, child, keyPrefix));
 	}
@@ -646,18 +752,24 @@ export class TodoView extends ItemView {
 	 * @param key 分组键，用于记录折叠状态
 	 * @param tooltip 标题行悬停提示
 	 * @param count 标题行显示的数量
+	 * @param icon 分组类型图标，用于区分文件分组与标题分组
 	 * @param renderName 渲染分组名称
 	 * @return 分组内容区容器
 	 */
-	private renderGroupShell(parent: HTMLElement, key: string, tooltip: string, count: number, renderName: (nameEl: HTMLElement) => void): HTMLElement {
+	private renderGroupShell(parent: HTMLElement, key: string, tooltip: string, count: number, icon: GroupIcon, renderName: (nameEl: HTMLElement) => void): HTMLElement {
 		const groupEl = parent.createDiv({ cls: "ctv-group" });
+		groupEl.toggleClass("is-file-group", icon === GroupIcon.File);
 		groupEl.toggleClass("is-collapsed", this.collapsedGroups.has(key));
+		// 记录分组键，供全部展开/折叠使用
+		this.renderedGroupKeys.push(key);
 
-		// 标题行：折叠箭头 + 名称 + 数量
+		// 标题行：折叠箭头 + 类型图标 + 名称 + 数量
 		const titleEl = groupEl.createDiv({ cls: "ctv-group-title" });
 		titleEl.setAttr("title", tooltip);
 		const arrow = titleEl.createSpan({ cls: "ctv-group-arrow" });
 		setIcon(arrow, "chevron-down");
+		const iconEl = titleEl.createSpan({ cls: "ctv-group-icon" });
+		setIcon(iconEl, icon);
 		renderName(titleEl.createSpan({ cls: "ctv-group-name" }));
 		titleEl.createSpan({ cls: "ctv-group-count", text: String(count) });
 
@@ -671,6 +783,7 @@ export class TodoView extends ItemView {
 				this.collapsedGroups.add(key);
 			}
 			groupEl.toggleClass("is-collapsed", this.collapsedGroups.has(key));
+			this.updateFoldAction();
 		});
 
 		return groupEl.createDiv({ cls: "ctv-group-body" });

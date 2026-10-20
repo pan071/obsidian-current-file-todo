@@ -215,8 +215,18 @@ export class TodoSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("TODO 文本自动换行")
+			.setDesc("关闭时每条 TODO 单行展示，超出部分通过整个列表的横向滚动查看；开启时自动换行，并按下方行数折叠长文本。")
+			.addToggle((toggle) =>
+				toggle.setValue(settings.wrapText).onChange(async (value) => {
+					settings.wrapText = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
 			.setName("长文本折叠行数")
-			.setDesc("超过该行数的内容会折叠，可点击“展开”查看全文。")
+			.setDesc("开启自动换行时生效，超过该行数的内容会折叠，可点击“展开”查看全文。")
 			.addSlider((slider) =>
 				slider
 					.setLimits(1, 10, 1)
