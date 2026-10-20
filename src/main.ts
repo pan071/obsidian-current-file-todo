@@ -26,6 +26,8 @@ export default class CurrentFileTodoPlugin extends Plugin {
 	private readonly todoCache = new Map<string, { mtime: number; items: TodoItem[] }>();
 	/** 缓存对应的解析配置签名，解析相关配置变化时整体失效 */
 	private cacheSignature = "";
+	/** 编辑中尚未落盘的内容：文件路径 → 编辑事件触发时的编辑器全文；只在编辑事件中写入，保证内容与文件一一对应 */
+	private readonly liveContent = new Map<string, string>();
 
 	/** 编辑过程中的防抖刷新，避免每输入一个字符就重新解析 */
 	private readonly debouncedRefresh = debounce(() => this.refreshViews(), 300, true);
@@ -69,17 +71,23 @@ export default class CurrentFileTodoPlugin extends Plugin {
 				}
 			}),
 		);
-		// 编辑范围内的文件时防抖刷新
+		// 编辑文件：记录编辑器内容，范围内的文件防抖刷新
 		this.registerEvent(
-			this.app.workspace.on("editor-change", (_editor, info) => {
-				if (info.file && this.isInScope(info.file.path)) {
+			this.app.workspace.on("editor-change", (editor, info) => {
+				if (!info.file) {
+					return;
+				}
+				// 编辑事件中的编辑器与文件一定对应，切换笔记的中间状态不会混入其他文件的内容
+				this.liveContent.set(info.file.path, editor.getValue());
+				if (this.isInScope(info.file.path)) {
 					this.debouncedRefresh();
 				}
 			}),
 		);
-		// 文件在外部被修改（如同步）时，丢弃缓存并刷新
+		// 文件落盘或在外部被修改（如同步）时，丢弃编辑内容与缓存，改为读取磁盘内容并刷新
 		this.registerEvent(
 			this.app.vault.on("modify", (file) => {
+				this.liveContent.delete(file.path);
 				this.todoCache.delete(file.path);
 				if (this.isInScope(file.path)) {
 					this.debouncedRefresh();
@@ -102,7 +110,9 @@ export default class CurrentFileTodoPlugin extends Plugin {
 				this.dropCache(file, file.path);
 				if (file === this.currentFile) {
 					this.setCurrentFile(null);
-				} else if (file instanceof TFolder || this.isInScope(file.path)) {
+				}
+				// 锁定目录的视图不依赖当前文件，需要单独判断是否刷新
+				if (file instanceof TFolder || this.isInScope(file.path)) {
 					this.refreshViews();
 				}
 			}),
@@ -185,7 +195,10 @@ export default class CurrentFileTodoPlugin extends Plugin {
 			return;
 		}
 		this.currentFile = file;
-		this.refreshViews();
+		// 只刷新依赖当前文件的视图，锁定目录的视图内容不受影响，避免跳转时闪烁
+		this.getTodoViews()
+			.filter((view) => view.dependsOnCurrentFile())
+			.forEach((view) => void view.refresh());
 	}
 
 	/**
@@ -229,9 +242,11 @@ export default class CurrentFileTodoPlugin extends Plugin {
 		// 目录变化会影响其下所有文件的路径，直接清空
 		if (file instanceof TFolder) {
 			this.todoCache.clear();
+			this.liveContent.clear();
 			return;
 		}
 		this.todoCache.delete(path);
+		this.liveContent.delete(path);
 	}
 
 	/**
@@ -248,16 +263,16 @@ export default class CurrentFileTodoPlugin extends Plugin {
 	}
 
 	/**
-	 * 解析单个文件：已在编辑器中打开时读取编辑器内容，否则优先使用缓存
+	 * 解析单个文件：有尚未落盘的编辑内容时解析编辑内容，否则优先使用缓存
 	 *
 	 * @param file 目标文件
-	 * @param view 已打开该文件的编辑器视图；未打开时为 undefined
 	 * @return TODO 列表
 	 */
-	private async parseFile(file: TFile, view?: MarkdownView): Promise<TodoItem[]> {
-		// 编辑器内容可能尚未保存，每次都重新解析，保证与正在输入的内容一致
-		if (view) {
-			return parseTodos(view.getViewData(), this.settings);
+	private async parseFile(file: TFile): Promise<TodoItem[]> {
+		// 编辑内容尚未保存，每次都重新解析，保证与正在输入的内容一致
+		const live = this.liveContent.get(file.path);
+		if (live !== undefined) {
+			return parseTodos(live, this.settings);
 		}
 		// 修改时间未变时直接复用缓存
 		const cached = this.todoCache.get(file.path);
@@ -270,15 +285,14 @@ export default class CurrentFileTodoPlugin extends Plugin {
 	}
 
 	/**
-	 * 解析文件中的 TODO，优先读取编辑器中尚未保存的内容
+	 * 解析文件中的 TODO，优先使用编辑中尚未保存的内容
 	 *
 	 * @param file 目标文件
 	 * @return TODO 列表
 	 */
 	async collectTodos(file: TFile): Promise<TodoItem[]> {
 		this.ensureCacheSignature();
-		const view = this.findMarkdownLeaf(file)?.view;
-		return this.parseFile(file, view instanceof MarkdownView ? view : undefined);
+		return this.parseFile(file);
 	}
 
 	/**
@@ -294,16 +308,7 @@ export default class CurrentFileTodoPlugin extends Plugin {
 			return { files: [], fileCount: files.length, overLimit: true };
 		}
 		this.ensureCacheSignature();
-		// 已在编辑器中打开的文件读取编辑器内容
-		const openViews = new Map<string, MarkdownView>();
-		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-			if (leaf.view instanceof MarkdownView && leaf.view.file) {
-				openViews.set(leaf.view.file.path, leaf.view);
-			}
-		}
-		const results: FileTodos[] = await Promise.all(
-			files.map(async (file) => ({ file, items: await this.parseFile(file, openViews.get(file.path)) })),
-		);
+		const results: FileTodos[] = await Promise.all(files.map(async (file) => ({ file, items: await this.parseFile(file) })));
 		// 只保留有 TODO 的文件，并按路径自然排序，使「2、xxx」排在「10、xxx」之前
 		const withTodos = results
 			.filter((result) => result.items.length > 0)

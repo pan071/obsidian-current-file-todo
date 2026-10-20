@@ -302,6 +302,16 @@ export class TodoView extends ItemView {
 	}
 
 	/**
+	 * 判断本视图的展示内容是否随当前文件变化：文件范围或未锁定的目录范围
+	 *
+	 * @return 依赖当前文件时为 true
+	 */
+	dependsOnCurrentFile(): boolean {
+		// 锁定目录后内容只取决于锁定的目录
+		return this.plugin.settings.scopeMode === ScopeMode.File || this.pinnedFolder === null;
+	}
+
+	/**
 	 * 判断文件是否在本视图的展示范围内
 	 *
 	 * @param path 文件路径
