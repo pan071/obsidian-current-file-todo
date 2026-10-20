@@ -219,6 +219,7 @@ export function parseTodos(content: string, settings: TodoSettings): TodoItem[] 
 			}
 		}
 		const headingPath = headingStack.map((h) => h.text);
+		const headingLevels = headingStack.map((h) => h.level);
 		// endregion
 
 		// region Markdown 任务
@@ -247,6 +248,7 @@ export function parseTodos(content: string, settings: TodoSettings): TodoItem[] 
 				nextLine: settings.showNextLine ? findNextLine(lines, i, matchers) : null,
 				completed,
 				headingPath,
+				headingLevels,
 				inCodeBlock,
 			});
 			continue;
@@ -264,6 +266,7 @@ export function parseTodos(content: string, settings: TodoSettings): TodoItem[] 
 				nextLine: settings.showNextLine ? findNextLine(lines, i, matchers) : null,
 				completed: false,
 				headingPath,
+				headingLevels,
 				inCodeBlock,
 			});
 		}

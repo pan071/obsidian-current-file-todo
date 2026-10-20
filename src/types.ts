@@ -66,6 +66,8 @@ export interface TodoItem {
 	completed: boolean;
 	/** 所属标题路径，如 ["提成设置", "复活"] */
 	headingPath: string[];
+	/** 标题路径中各级标题的层级（1～6，对应 `#` 的数量），与 headingPath 一一对应 */
+	headingLevels: number[];
 	/** 是否位于代码块内 */
 	inCodeBlock: boolean;
 }

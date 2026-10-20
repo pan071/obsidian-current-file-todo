@@ -112,8 +112,9 @@
 	height: 14px;
 }
 
-/* 锁定状态下高亮图标 */
-.ctv-header-pin.is-active {
+/* 锁定、包含子目录开启时高亮图标 */
+.ctv-header-pin.is-active,
+.ctv-header-toggle.is-active {
 	color: var(--text-accent);
 }
 
@@ -179,7 +180,7 @@
 	white-space: nowrap;
 }
 
-/* 分组类型图标：标题分组为浅色 #，文件分组为强调色文件图标 */
+/* 分组类型图标：标题分组为浅色层级标记（#、## 等），文件分组为强调色文件图标，子目录分组为文件夹图标 */
 .ctv-group-icon {
 	display: flex;
 	flex-shrink: 0;
@@ -191,12 +192,25 @@
 	height: 13px;
 }
 
+/* 标题层级标记：按实际层级展示 #、##，使用等宽字体 */
+.ctv-group-icon.ctv-group-level {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	font-weight: normal;
+	line-height: 1;
+}
+
 .ctv-group.is-file-group > .ctv-group-title > .ctv-group-icon {
 	color: var(--text-accent);
 }
 
-/* 标题分组使用常规字重，与加粗的文件分组区分 */
-.ctv-group:not(.is-file-group) > .ctv-group-title {
+/* 子目录分组使用常规文字颜色的文件夹图标 */
+.ctv-group.is-folder-group > .ctv-group-title > .ctv-group-icon {
+	color: var(--text-muted);
+}
+
+/* 标题分组使用常规字重，与加粗的目录、文件分组区分 */
+.ctv-group:not(.is-file-group):not(.is-folder-group) > .ctv-group-title {
 	font-weight: var(--font-normal);
 }
 

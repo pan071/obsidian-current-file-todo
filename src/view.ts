@@ -20,6 +20,8 @@ interface TodoGroup {
 	key: string;
 	/** 标题路径 */
 	path: string[];
+	/** 最后一级标题的层级（1～6）；无标题时为 0 */
+	level: number;
 	/** 分组内 TODO */
 	items: TodoItem[];
 }
@@ -28,12 +30,30 @@ interface TodoGroup {
  * 分组类型图标（Lucide 图标名），用于区分文件分组与标题分组
  */
 enum GroupIcon {
+	/** 子目录分组（目录范围下包含子目录时） */
+	Folder = "folder",
 	/** 文件分组（目录范围下） */
 	File = "file-text",
 	/** 标题分组 */
 	Heading = "hash",
 	/** 第一个标题之前的内容 */
 	DocumentStart = "align-left",
+}
+
+/**
+ * 目录树分组的目录节点
+ */
+interface FolderNode {
+	/** 相对范围目录的路径，如「需求文档/01、公共口径」；范围目录本身为空字符串 */
+	path: string;
+	/** 本级目录名 */
+	name: string;
+	/** 直接位于本目录下的文件 */
+	files: FileTodos[];
+	/** 子目录节点，键为目录名 */
+	children: Map<string, FolderNode>;
+	/** 本目录及所有子目录下的 TODO 总数 */
+	total: number;
 }
 
 /**
@@ -44,6 +64,8 @@ interface HeadingNode {
 	key: string;
 	/** 本级标题文本 */
 	title: string;
+	/** 本级标题的层级（1～6），对应 `#` 的数量 */
+	level: number;
 	/** 直接位于本标题下（不含子标题）的 TODO */
 	items: TodoItem[];
 	/** 子标题节点，保持首次出现顺序 */
@@ -373,7 +395,12 @@ export class TodoView extends ItemView {
 		}
 		if (result.overLimit) {
 			const limit = this.plugin.settings.maxFolderFiles;
-			this.renderEmpty(`目录下有 ${result.fileCount} 个 Markdown 文件，超过扫描上限 ${limit}。请缩小范围、关闭「包含子目录」或在设置中调高上限。`, scope.pinned);
+			const emptyEl = this.renderEmpty(`目录下有 ${result.fileCount} 个 Markdown 文件，超过扫描上限 ${limit}。请缩小范围、关闭「包含子目录」或在设置中调高上限。`, scope.pinned);
+			// 包含子目录导致超限时，提供一键关闭入口
+			if (emptyEl && this.plugin.settings.includeSubfolders) {
+				const offEl = emptyEl.createDiv({ cls: "ctv-empty-action", text: "关闭包含子目录" });
+				offEl.addEventListener("click", () => void this.toggleSubfolders());
+			}
 			return;
 		}
 		const title = folder.isRoot() ? this.app.vault.getName() : folder.name;
@@ -411,13 +438,14 @@ export class TodoView extends ItemView {
 	 *
 	 * @param message 提示文字
 	 * @param showUnpin 是否附带「解除锁定」入口（锁定目录不可用时）
+	 * @return 空状态容器，用于追加其他操作入口；视图未打开时为 null
 	 */
-	private renderEmpty(message: string, showUnpin = false): void {
+	private renderEmpty(message: string, showUnpin = false): HTMLElement | null {
 		this.data = null;
 		this.renderedGroupKeys = [];
 		this.updateFoldAction();
 		if (!this.bodyEl) {
-			return;
+			return null;
 		}
 		this.headerEl?.empty();
 		this.bodyEl.empty();
@@ -430,6 +458,7 @@ export class TodoView extends ItemView {
 				void this.refresh();
 			});
 		}
+		return emptyEl;
 	}
 
 	/**
@@ -480,8 +509,8 @@ export class TodoView extends ItemView {
 				items.forEach((item) => this.renderItem(listEl, file, item, true, false));
 			}
 		} else if (settings.displayMode === DisplayMode.Group) {
-			// 目录范围 + 分组：先按文件分组，文件内再按标题分组
-			filtered.forEach((ft) => this.renderFileGroup(listEl, ft, data.folderPath));
+			// 目录范围 + 分组：按目录树逐级分组，文件内再按标题分组
+			this.renderFolderTree(listEl, filtered, data.folderPath);
 		} else {
 			// 目录范围 + 平铺：按文件顺序、文件内按行号顺序平铺，每条附带文件名
 			filtered.forEach((ft) => ft.items.forEach((item) => this.renderItem(listEl, ft.file, item, true, true)));
@@ -518,6 +547,13 @@ export class TodoView extends ItemView {
 		if (!isFolder) {
 			return;
 		}
+		// 包含子目录开关：开启时高亮，切换后立即重新汇总
+		const subfoldersOn = this.plugin.settings.includeSubfolders;
+		const subEl = header.createSpan({ cls: "ctv-header-button ctv-header-toggle clickable-icon" });
+		setIcon(subEl, "folder-tree");
+		subEl.toggleClass("is-active", subfoldersOn);
+		subEl.setAttr("aria-label", subfoldersOn ? "已包含子目录，点击只看当前目录" : "点击包含子目录");
+		subEl.addEventListener("click", () => void this.toggleSubfolders());
 		// 上一级按钮：根目录没有上一级时不展示
 		const parentFolder = this.app.vault.getAbstractFileByPath(data.folderPath)?.parent ?? null;
 		if (parentFolder) {
@@ -562,6 +598,15 @@ export class TodoView extends ItemView {
 			return;
 		}
 		await this.refresh();
+	}
+
+	/**
+	 * 切换目录范围是否包含子目录，保存配置时会刷新所有视图
+	 */
+	private async toggleSubfolders(): Promise<void> {
+		const settings = this.plugin.settings;
+		settings.includeSubfolders = !settings.includeSubfolders;
+		await this.plugin.saveSettings();
 	}
 
 	/**
@@ -620,21 +665,64 @@ export class TodoView extends ItemView {
 	}
 
 	/**
+	 * 按目录树渲染：子目录逐级成组（每级单独一行），同一层先列子目录再列文件
+	 *
+	 * @param parent 父容器
+	 * @param files 含 TODO 的文件，按路径自然排序
+	 * @param folderPath 范围目录路径，文件按相对该目录的路径挂到树上
+	 */
+	private renderFolderTree(parent: HTMLElement, files: FileTodos[], folderPath: string): void {
+		const root: FolderNode = { path: "", name: "", files: [], children: new Map(), total: 0 };
+		// 沿相对目录逐级挂载文件，同时累计每级目录下的 TODO 总数
+		for (const ft of files) {
+			let node = root;
+			const dir = relativeDir(ft.file, folderPath);
+			const segments = dir.length > 0 ? dir.split("/") : [];
+			segments.forEach((name, index) => {
+				const path = segments.slice(0, index + 1).join("/");
+				let child = node.children.get(name);
+				if (!child) {
+					child = { path, name, files: [], children: new Map(), total: 0 };
+					node.children.set(name, child);
+				}
+				child.total += ft.items.length;
+				node = child;
+			});
+			node.files.push(ft);
+		}
+		this.renderFolderNode(parent, root, folderPath);
+	}
+
+	/**
+	 * 递归渲染目录树节点的内容：先渲染子目录分组，再渲染本目录下的文件分组
+	 *
+	 * @param parent 父容器
+	 * @param node 目录节点
+	 * @param folderPath 范围目录路径，用于拼接悬停提示中的完整路径
+	 */
+	private renderFolderNode(parent: HTMLElement, node: FolderNode, folderPath: string): void {
+		const root = normalizeFolderPath(folderPath);
+		// 子目录按名称自然排序，与 Obsidian 文件列表一致
+		const children = Array.from(node.children.values()).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+		for (const child of children) {
+			const fullPath = root.length > 0 ? `${root}/${child.path}` : child.path;
+			const bodyEl = this.renderGroupShell(parent, `dir:${child.path}`, fullPath, child.total, GroupIcon.Folder, 0, (nameEl) => nameEl.setText(child.name));
+			this.renderFolderNode(bodyEl, child, folderPath);
+		}
+		// 本目录下的文件已按路径排序，直接按顺序渲染
+		node.files.forEach((ft) => this.renderFileGroup(parent, ft));
+	}
+
+	/**
 	 * 渲染目录范围下的单个文件分组，文件内再按标题分组
 	 *
 	 * @param parent 父容器
 	 * @param fileTodos 文件及其 TODO
-	 * @param folderPath 范围目录路径，用于展示子目录相对路径
 	 */
-	private renderFileGroup(parent: HTMLElement, fileTodos: FileTodos, folderPath: string): void {
+	private renderFileGroup(parent: HTMLElement, fileTodos: FileTodos): void {
 		const { file, items } = fileTodos;
-		const bodyEl = this.renderGroupShell(parent, `file:${file.path}`, file.path, items.length, GroupIcon.File, (nameEl) => {
+		const bodyEl = this.renderGroupShell(parent, `file:${file.path}`, file.path, items.length, GroupIcon.File, 0, (nameEl) => {
 			nameEl.addClass("ctv-group-file");
-			// 包含子目录时，以浅色显示文件所在的子目录
-			const dir = relativeDir(file, folderPath);
-			if (dir.length > 0) {
-				nameEl.createSpan({ cls: "ctv-group-parent", text: `${dir}/` });
-			}
 			nameEl.createSpan({ text: file.basename });
 			// 附带文件后缀，与标题分组明显区分
 			nameEl.createSpan({ cls: "ctv-group-ext", text: `.${file.extension}` });
@@ -673,7 +761,9 @@ export class TodoView extends ItemView {
 			const key = item.headingPath.join(" > ");
 			let group = groups.get(key);
 			if (!group) {
-				group = { key, path: item.headingPath, items: [] };
+				// 取最后一级标题的层级，用于展示对应数量的 `#`
+				const level = item.headingLevels[item.headingLevels.length - 1] ?? 0;
+				group = { key, path: item.headingPath, level, items: [] };
 				groups.set(key, group);
 			}
 			group.items.push(item);
@@ -681,7 +771,7 @@ export class TodoView extends ItemView {
 
 		for (const group of groups.values()) {
 			const icon = group.path.length === 0 ? GroupIcon.DocumentStart : GroupIcon.Heading;
-			const bodyEl = this.renderGroupShell(parent, keyPrefix + group.key, group.key || NO_HEADING, group.items.length, icon, (nameEl) => {
+			const bodyEl = this.renderGroupShell(parent, keyPrefix + group.key, group.key || NO_HEADING, group.items.length, icon, group.level, (nameEl) => {
 				if (group.path.length === 0) {
 					nameEl.setText(NO_HEADING);
 					return;
@@ -705,7 +795,7 @@ export class TodoView extends ItemView {
 	 * @param keyPrefix 分组键前缀
 	 */
 	private renderNestedGroups(parent: HTMLElement, file: TFile, items: TodoItem[], keyPrefix: string): void {
-		const root: HeadingNode = { key: "", title: "", items: [], children: new Map(), total: 0 };
+		const root: HeadingNode = { key: "", title: "", level: 0, items: [], children: new Map(), total: 0 };
 		// 沿标题路径逐级挂载，同时累计每个节点下的 TODO 总数
 		for (const item of items) {
 			let node = root;
@@ -714,7 +804,7 @@ export class TodoView extends ItemView {
 				const key = item.headingPath.slice(0, index + 1).join(" > ");
 				let child = node.children.get(key);
 				if (!child) {
-					child = { key, title, items: [], children: new Map(), total: 0 };
+					child = { key, title, level: item.headingLevels[index] ?? 0, items: [], children: new Map(), total: 0 };
 					node.children.set(key, child);
 				}
 				child.total++;
@@ -725,7 +815,7 @@ export class TodoView extends ItemView {
 
 		// 第一个标题之前的 TODO 单独成组
 		if (root.items.length > 0) {
-			const bodyEl = this.renderGroupShell(parent, keyPrefix, NO_HEADING, root.items.length, GroupIcon.DocumentStart, (nameEl) => nameEl.setText(NO_HEADING));
+			const bodyEl = this.renderGroupShell(parent, keyPrefix, NO_HEADING, root.items.length, GroupIcon.DocumentStart, 0, (nameEl) => nameEl.setText(NO_HEADING));
 			root.items.forEach((item) => this.renderItem(bodyEl, file, item, false, false));
 		}
 		root.children.forEach((child) => this.renderHeadingNode(parent, file, child, keyPrefix));
@@ -740,7 +830,7 @@ export class TodoView extends ItemView {
 	 * @param keyPrefix 分组键前缀
 	 */
 	private renderHeadingNode(parent: HTMLElement, file: TFile, node: HeadingNode, keyPrefix: string): void {
-		const bodyEl = this.renderGroupShell(parent, keyPrefix + node.key, node.key, node.total, GroupIcon.Heading, (nameEl) => nameEl.setText(node.title));
+		const bodyEl = this.renderGroupShell(parent, keyPrefix + node.key, node.key, node.total, GroupIcon.Heading, node.level, (nameEl) => nameEl.setText(node.title));
 		node.items.forEach((item) => this.renderItem(bodyEl, file, item, false, false));
 		node.children.forEach((child) => this.renderHeadingNode(bodyEl, file, child, keyPrefix));
 	}
@@ -753,12 +843,14 @@ export class TodoView extends ItemView {
 	 * @param tooltip 标题行悬停提示
 	 * @param count 标题行显示的数量
 	 * @param icon 分组类型图标，用于区分文件分组与标题分组
+	 * @param headingLevel 标题层级（1～6），标题分组按层级展示对应数量的 `#`；非标题分组为 0
 	 * @param renderName 渲染分组名称
 	 * @return 分组内容区容器
 	 */
-	private renderGroupShell(parent: HTMLElement, key: string, tooltip: string, count: number, icon: GroupIcon, renderName: (nameEl: HTMLElement) => void): HTMLElement {
+	private renderGroupShell(parent: HTMLElement, key: string, tooltip: string, count: number, icon: GroupIcon, headingLevel: number, renderName: (nameEl: HTMLElement) => void): HTMLElement {
 		const groupEl = parent.createDiv({ cls: "ctv-group" });
 		groupEl.toggleClass("is-file-group", icon === GroupIcon.File);
+		groupEl.toggleClass("is-folder-group", icon === GroupIcon.Folder);
 		groupEl.toggleClass("is-collapsed", this.collapsedGroups.has(key));
 		// 记录分组键，供全部展开/折叠使用
 		this.renderedGroupKeys.push(key);
@@ -769,7 +861,13 @@ export class TodoView extends ItemView {
 		const arrow = titleEl.createSpan({ cls: "ctv-group-arrow" });
 		setIcon(arrow, "chevron-down");
 		const iconEl = titleEl.createSpan({ cls: "ctv-group-icon" });
-		setIcon(iconEl, icon);
+		if (icon === GroupIcon.Heading && headingLevel > 0) {
+			// 标题分组按实际层级展示 `#`、`##`，与 Markdown 写法一致，避免与文件名混淆
+			iconEl.addClass("ctv-group-level");
+			iconEl.setText("#".repeat(headingLevel));
+		} else {
+			setIcon(iconEl, icon);
+		}
 		renderName(titleEl.createSpan({ cls: "ctv-group-name" }));
 		titleEl.createSpan({ cls: "ctv-group-count", text: String(count) });
 
